@@ -1,0 +1,132 @@
+import { useEffect } from "react";
+import { useExperiment } from "../contexts/ExperimentContext";
+import { filterTasksByExperiment } from "../utils/experimentTasks";
+
+interface UseStepRunningProjectOptions {
+  step: number;
+  setProjectUuid: (uuid: string | null) => void;
+  setContainerId: (containerId: string | null) => void;
+  setProjectName: (name: string) => void;
+}
+
+/**
+ * Hook to automatically detect and track running tasks for a specific step.
+ * Checks for running tasks when the component mounts and verifies actual container status.
+ * If container is not running, updates project status based on exit code.
+ */
+export function useStepRunningProject({
+  step,
+  setProjectUuid,
+  setContainerId,
+  setProjectName,
+}: UseStepRunningProjectOptions) {
+  const { currentExperiment } = useExperiment();
+
+  useEffect(() => {
+    const checkRunningProject = async () => {
+      try {
+        const allTasks = await window.db.getProjects();
+        const stepRunningTasks = filterTasksByExperiment(allTasks, currentExperiment?.uuid)
+          .filter(
+            (project) =>
+              String(project.step) === String(step) &&
+              project.status === "running"
+          )
+          .sort(
+            (a, b) =>
+              new Date(b.created_at).getTime() -
+              new Date(a.created_at).getTime()
+          );
+
+        if (stepRunningTasks.length > 0) {
+          const runningProject = stepRunningTasks[0];
+          const stepKey = `step${step}`;
+          const stepData = runningProject.parameters[stepKey] as
+            | { containerId?: string }
+            | undefined;
+          const foundContainerId = stepData?.containerId;
+
+          if (foundContainerId) {
+            // Verify actual container status
+            const containerStatus = await window.docker.isContainerRunning(foundContainerId);
+            console.log(`[useStepRunningProject] Container ${foundContainerId} status:`, containerStatus);
+            
+            if (containerStatus.success && containerStatus.running) {
+              // Container is actually running
+              console.log(`[useStepRunningProject] Container is running, setting project state`);
+              setProjectUuid(runningProject.uuid);
+              setContainerId(foundContainerId);
+              setProjectName(runningProject.name);
+            } else {
+              // Container is not running, check current project status and update if needed
+              console.log(`[useStepRunningProject] Container is not running, checking project status`);
+              const currentProject = await window.db.getProject(runningProject.uuid);
+              
+              // Only update if project is still in running status
+              if (currentProject && currentProject.status === 'running') {
+                console.log(`[useStepRunningProject] Project is still running, checking exit code`);
+                // Check exit code and update project status
+                const exitCodeResult = await window.docker.getContainerExitCode(foundContainerId);
+                console.log(`[useStepRunningProject] Exit code result:`, exitCodeResult);
+                console.log(`[useStepRunningProject] Container ID: ${foundContainerId}`);
+                console.log(`[useStepRunningProject] Exit Code: ${exitCodeResult.exitCode}`);
+                console.log(`[useStepRunningProject] Exit Code Type: ${typeof exitCodeResult.exitCode}`);
+                
+                if (exitCodeResult.success && exitCodeResult.exitCode !== null) {
+                  // Update project status based on exit code
+                  const newStatus = exitCodeResult.exitCode === 0 ? 'success' : 'failed';
+                  console.log(`[useStepRunningProject] Exit Code = ${exitCodeResult.exitCode}, Status = ${newStatus}`);
+                  console.log(`[useStepRunningProject] Updating project status to: ${newStatus}`);
+                  await window.db.updateProject(runningProject.uuid, { status: newStatus });
+                } else {
+                  // Container not found - likely removed by --rm after successful completion
+                  // If container is not running and we can't get exit code, assume success
+                  // (containers that fail usually remain for inspection)
+                  console.log(`[useStepRunningProject] Container not found (likely removed by --rm), assuming success`);
+                  console.log(`[useStepRunningProject] exitCodeResult.success: ${exitCodeResult.success}, exitCode: ${exitCodeResult.exitCode}`);
+                  await window.db.updateProject(runningProject.uuid, { status: 'success' });
+                }
+              } else {
+                console.log(`[useStepRunningProject] Project status is already ${currentProject?.status}, skipping update`);
+              }
+              
+              // Don't set state for this project since it's no longer running
+            }
+          } else {
+            // No containerId found - this could mean:
+            // 1. Container hasn't started yet (project just created)
+            // 2. Container was removed (--rm) after successful completion
+            // 3. Project creation failed before container started
+            // Don't mark as failed immediately - wait for container to start or check if project is very old
+            console.log(`[useStepRunningProject] No containerId found for running project`);
+            const currentProject = await window.db.getProject(runningProject.uuid);
+            if (currentProject && currentProject.status === 'running') {
+              // Check if project is older than 30 seconds (container should have started by then)
+              const projectAge = Date.now() - new Date(currentProject.created_at).getTime();
+              if (projectAge > 30000) {
+                // Project is older than 30 seconds but no containerId - likely failed
+                console.log(`[useStepRunningProject] Project is older than 30s with no containerId, marking as failed`);
+                await window.db.updateProject(runningProject.uuid, { status: 'failed' });
+              } else {
+                // Project is new, container might not have started yet - wait
+                console.log(`[useStepRunningProject] Project is new (${projectAge}ms old), waiting for container to start`);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error checking running tasks for step ${step}:`, error);
+      }
+    };
+
+    // Check immediately on mount
+    checkRunningProject();
+    
+    // Poll every 2 seconds to continuously verify container status
+    const intervalId = setInterval(checkRunningProject, 2000);
+    
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [step, currentExperiment?.uuid, setProjectUuid, setContainerId, setProjectName]);
+}

@@ -1,0 +1,45 @@
+import path from 'node:path'
+
+// Extended PATH for command execution
+export function getExtendedPath(): string {
+  const basePath = process.env.PATH || ''
+  
+  if (process.platform === 'win32') {
+    return basePath
+  }
+  
+  // macOS/Linux: Add common Docker installation paths
+  const additionalPaths = [
+    '/usr/local/bin',
+    '/usr/bin',
+    '/opt/homebrew/bin',
+    '/Applications/Docker.app/Contents/Resources/bin'
+  ]
+  
+  return `${basePath}:${additionalPaths.join(':')}`
+}
+
+/**
+ * Generate a log file path.
+ * @param logPath The directory path to save the log file
+ * @param stepNumber Step number (e.g. "1", "2")
+ * @param taskUuid The unique ID of the Task
+ * @returns The generated log file path
+ */
+export function generateLogFilePath(logPath: string, stepNumber: string, taskUuid: string): string {
+  const now = new Date()
+  const dateStr = now.toISOString().split('T')[0]
+  const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-')
+  return path.join(logPath, `step${stepNumber}-${taskUuid}-${dateStr}-${timeStr}.log`)
+}
+
+/**
+ * Generate a project folder name from project name and UUID.
+ * @param projectName The name of the project
+ * @param projectUuid The UUID of the project
+ * @returns The generated folder name in format: {projectName}_{uuidFirst6Chars}
+ */
+export function generateProjectFolderName(projectName: string, projectUuid: string): string {
+  return `${projectName}_${projectUuid.substring(0, 6)}`
+}
+

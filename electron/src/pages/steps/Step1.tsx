@@ -1,0 +1,521 @@
+import { useState, useEffect, useCallback } from "react";
+import {
+  PathInput,
+  TextInput,
+  NumberInput,
+  StepRunButton,
+} from "../../components/form";
+import ProjectStatusMonitor from "../../components/ProjectStatusMonitor";
+import ExperimentDagStatus from "../../components/ExperimentDagStatus";
+import StepDescriptionModal from "../../components/StepDescriptionModal";
+import { useStepRunningProject } from "../../hooks/useStepRunningProject";
+import { useStepRunningStatus } from "../../hooks/useStepRunningStatus";
+import { useExperiment } from "../../contexts/ExperimentContext";
+import { filterTasksByExperiment, getNextTaskName } from "../../utils/experimentTasks";
+import type { StepPageProps } from "../../types";
+import type { Project } from "../../types/project";
+
+function Step1(_: StepPageProps) {
+  const { currentExperiment } = useExperiment();
+  const [projectName, setProjectName] = useState("");
+  const [inputPath, setInputPath] = useState("");
+  const [outputPath, setOutputPath] = useState("");
+  const [memory, setMemory] = useState("8");
+  const [precursorTolerance, setPrecursorTolerance] = useState("16");
+  const [randomSeed, setRandomSeed] = useState("32");
+  const [isRunning, setIsRunning] = useState(false);
+  const [message, setMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [projectUuid, setProjectUuid] = useState<string | null>(null);
+  const [containerId, setContainerId] = useState<string | null>(null);
+  const [isDescriptionModalOpen, setIsDescriptionModalOpen] = useState(false);
+  const [step1Tasks, setStep1Tasks] = useState<Project[]>([]);
+
+  // Check for running tasks when page loads
+  useStepRunningProject({
+    step: 1,
+    setProjectUuid,
+    setContainerId,
+    setProjectName,
+  });
+
+  // Check if there's a running project (polling status)
+  const hasRunningProject = useStepRunningStatus(projectUuid);
+
+  // Persist input values
+  useEffect(() => {
+    const saved = localStorage.getItem('step1_inputs');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.inputPath) setInputPath(parsed.inputPath);
+        if (parsed.outputPath) setOutputPath(parsed.outputPath);
+        if (parsed.memory) setMemory(parsed.memory);
+        if (parsed.precursorTolerance) setPrecursorTolerance(parsed.precursorTolerance);
+        if (parsed.randomSeed) setRandomSeed(parsed.randomSeed);
+      } catch (error) {
+        console.error('Error loading saved Step1 inputs:', error);
+      }
+    }
+  }, [currentExperiment?.uuid]);
+
+  // Save input values when they change
+  useEffect(() => {
+    const inputs = {
+      projectName,
+      inputPath,
+      outputPath,
+      memory,
+      precursorTolerance,
+      randomSeed,
+    };
+    localStorage.setItem('step1_inputs', JSON.stringify(inputs));
+  }, [projectName, inputPath, outputPath, memory, precursorTolerance, randomSeed]);
+
+  useEffect(() => {
+    const applyTaskName = async () => {
+      const allTasks = await window.db.getProjects();
+      setProjectName(getNextTaskName(allTasks, currentExperiment?.uuid, currentExperiment?.name, 1));
+    };
+    applyTaskName();
+  }, [currentExperiment?.uuid, currentExperiment?.name]);
+
+  useEffect(() => {
+    const loadStep1Tasks = async () => {
+      try {
+        const allTasks = await window.db.getProjects();
+        setStep1Tasks(
+          filterTasksByExperiment(allTasks, currentExperiment?.uuid).filter((project) => String(project.step) === "1")
+        );
+      } catch (error) {
+        console.error("Failed to load Step 1 tasks for name validation:", error);
+      }
+    };
+    loadStep1Tasks();
+  }, []);
+
+  const refreshTaskInfo = useCallback(async () => {
+    const allTasks = await window.db.getProjects();
+    setStep1Tasks(
+      filterTasksByExperiment(allTasks, currentExperiment?.uuid).filter((project) => String(project.step) === "1")
+    );
+    setProjectName(getNextTaskName(allTasks, currentExperiment?.uuid, currentExperiment?.name, 1));
+  }, [currentExperiment?.uuid, currentExperiment?.name]);
+
+  // Input folder validation
+  const [inputFiles, setInputFiles] = useState<string[]>([]);
+  const [inputValidation, setInputValidation] = useState<{
+    status: "idle" | "checking" | "valid" | "warning" | "error";
+    message: string;
+  }>({ status: "idle", message: "" });
+
+  const validateInputFolder = useCallback(async (folderPath: string) => {
+    if (!folderPath.trim()) {
+      setInputFiles([]);
+      setInputValidation({ status: "idle", message: "" });
+      return;
+    }
+
+    setInputValidation({ status: "checking", message: "Checking folder..." });
+
+    try {
+      const result = await window.fs.listFiles(folderPath);
+      if (!result.success) {
+        setInputFiles([]);
+        setInputValidation({
+          status: "error",
+          message: result.error || "Cannot read folder.",
+        });
+        return;
+      }
+
+      setInputFiles(result.files);
+
+      if (result.files.length === 0) {
+        setInputValidation({
+          status: "error",
+          message: "Folder is empty. No files found.",
+        });
+        return;
+      }
+
+      const mgfFiles = result.files.filter((f) =>
+        f.toLowerCase().endsWith(".mgf")
+      );
+      const nonMgfFiles = result.files.filter(
+        (f) => !f.toLowerCase().endsWith(".mgf")
+      );
+
+      if (mgfFiles.length === 0) {
+        setInputValidation({
+          status: "error",
+          message: `No .mgf files found. ${result.files.length} file(s) found with other extensions.`,
+        });
+      } else if (nonMgfFiles.length > 0) {
+        setInputValidation({
+          status: "warning",
+          message: `${mgfFiles.length} .mgf file(s) found, but ${nonMgfFiles.length} non-.mgf file(s) also exist.`,
+        });
+      } else {
+        setInputValidation({
+          status: "valid",
+          message: `${mgfFiles.length} .mgf file(s) found.`,
+        });
+      }
+    } catch {
+      setInputFiles([]);
+      setInputValidation({
+        status: "error",
+        message: "Failed to check folder.",
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      validateInputFolder(inputPath);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [inputPath, validateInputFolder]);
+
+  const normalizedProjectName = projectName.trim().toLowerCase();
+  const isDuplicateProjectName =
+    normalizedProjectName !== "" &&
+    step1Tasks.some(
+      (project) => project.name.trim().toLowerCase() === normalizedProjectName
+    );
+
+  // Check if all required parameters are entered
+  const isFormValid = () => {
+    return (
+      projectName.trim() !== "" &&
+      inputPath.trim() !== "" &&
+      outputPath.trim() !== "" &&
+      memory.trim() !== "" &&
+      precursorTolerance.trim() !== "" &&
+      randomSeed.trim() !== "" &&
+      (inputValidation.status === "valid" || inputValidation.status === "warning") &&
+      !isDuplicateProjectName
+    );
+  };
+
+  // Run Step 1 button click handler
+  const handleRunStep1 = async () => {
+    if (!isFormValid()) {
+      return;
+    }
+    const latestStep1Tasks = filterTasksByExperiment(await window.db.getProjects(), currentExperiment?.uuid).filter(
+      (project) => String(project.step) === "1"
+    );
+    const isDuplicateAtRunTime = latestStep1Tasks.some(
+      (project) =>
+        project.name.trim().toLowerCase() === projectName.trim().toLowerCase()
+    );
+    if (isDuplicateAtRunTime) {
+      setStep1Tasks(latestStep1Tasks);
+      setMessage({
+        type: "error",
+        text: "A Step 1 task with the same name already exists. Please choose a different task name.",
+      });
+      return;
+    }
+    if (isDuplicateProjectName) {
+      setMessage({
+        type: "error",
+        text: "A Step 1 task with the same name already exists. Please choose a different task name.",
+      });
+      return;
+    }
+
+    setIsRunning(true);
+    setMessage(null);
+
+    try {
+      const result = await window.step.runStep1({
+        experimentUuid: currentExperiment?.uuid,
+        projectName,
+        inputPath,
+        outputPath,
+        memory: memory.trim(),
+        precursorTolerance: precursorTolerance.trim(),
+        randomSeed: randomSeed.trim(),
+      });
+
+      if (result.success && result.project) {
+        setProjectUuid(result.project.uuid);
+        setContainerId(result.containerId || null);
+        setMessage(null);
+        console.log("Step1 execution result:", result);
+      } else {
+        setMessage({
+          type: "error",
+          text: `Step 1 execution failed: ${result.error}`,
+        });
+      }
+    } catch (error: unknown) {
+      console.error("Step1 execution error:", error);
+      setMessage({
+        type: "error",
+        text: `Unexpected error: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      });
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  return (
+    <div className="h-full flex gap-6">
+      {/* Left: Project and Step information */}
+      <div className="w-1/3">
+        <div className="bg-white rounded-lg shadow-sm p-6 sticky top-0">
+          <div className="mb-6">
+            <div className="flex items-center gap-2">
+              <h2 className="text-2xl font-bold text-gray-900">Step 1</h2>
+              <button
+                onClick={() => setIsDescriptionModalOpen(true)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+                title="Step Description"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </button>
+            </div>
+            <p className="text-sm text-gray-500">Decoy Spectra Generation</p>
+          </div>
+
+<ExperimentDagStatus currentStep={1} refreshTrigger={projectUuid} />
+
+
+        </div>
+      </div>
+
+      <div className="flex-1">
+        <div className="bg-white rounded-lg shadow-sm p-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-6">
+            Parameter Settings
+          </h2>
+
+          <div className="space-y-6">
+            <div>
+              <TextInput
+                label="Task Name"
+                value={projectName}
+                onChange={setProjectName}
+                placeholder="Enter the task name"
+                required={true}
+                readOnly
+                description="Generated from the experiment and step."
+              />
+              {isDuplicateProjectName && (
+                <p className="mt-1 text-xs text-red-600">
+                  This task name already exists in Step 1. Please enter a different name.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <PathInput
+                label="Input Folder Path"
+                value={inputPath}
+                onChange={setInputPath}
+                placeholder="/path/to/input/folder"
+                required={true}
+                description="The full path of the folder containing the input data (mounted inside the container at /app/input)"
+              />
+              {inputValidation.status !== "idle" && (
+                <div className="mt-2">
+                  <div
+                    className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg ${
+                      inputValidation.status === "checking"
+                        ? "bg-blue-50 text-blue-700"
+                        : inputValidation.status === "valid"
+                        ? "bg-green-50 text-green-700"
+                        : inputValidation.status === "warning"
+                        ? "bg-yellow-50 text-yellow-700"
+                        : "bg-red-50 text-red-700"
+                    }`}
+                  >
+                    {inputValidation.status === "checking" && (
+                      <svg
+                        className="w-3.5 h-3.5 animate-spin flex-shrink-0"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        />
+                      </svg>
+                    )}
+                    {inputValidation.status === "valid" && (
+                      <svg
+                        className="w-3.5 h-3.5 flex-shrink-0"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                    )}
+                    {inputValidation.status === "warning" && (
+                      <svg
+                        className="w-3.5 h-3.5 flex-shrink-0"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
+                        />
+                      </svg>
+                    )}
+                    {inputValidation.status === "error" && (
+                      <svg
+                        className="w-3.5 h-3.5 flex-shrink-0"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M6 18L18 6M6 6l12 12"
+                        />
+                      </svg>
+                    )}
+                    <span>{inputValidation.message}</span>
+                  </div>
+                  {inputFiles.length > 0 && (
+                    <details className="mt-1">
+                      <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                        Show files ({inputFiles.length})
+                      </summary>
+                      <ul className="mt-1 max-h-32 overflow-y-auto bg-gray-50 rounded-lg p-2 space-y-0.5">
+                        {inputFiles.map((file, idx) => (
+                          <li
+                            key={idx}
+                            className={`text-xs font-mono ${
+                              file.toLowerCase().endsWith(".mgf")
+                                ? "text-green-700"
+                                : "text-red-600"
+                            }`}
+                          >
+                            {file}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <PathInput
+              label="Output Folder Path"
+              value={outputPath}
+              onChange={setOutputPath}
+              placeholder="/path/to/output/folder"
+              required={true}
+              description="The full path of the folder to save the results (mounted inside the container at /app/output)"
+            />
+
+            <NumberInput
+              label="Memory"
+              value={memory}
+              onChange={setMemory}
+              placeholder="4"
+              required={true}
+              description="Memory allocation (integer, unit: GB) - passed as MEMORY environment variable (e.g. 4 → 4G)"
+            />
+
+            <NumberInput
+              label="Precursor Tolerance"
+              value={precursorTolerance}
+              onChange={setPrecursorTolerance}
+              placeholder="20"
+              required={true}
+              description="Precursor Tolerance value (integer) - passed as PRECURSOR_TOLERANCE environment variable"
+            />
+
+            <NumberInput
+              label="Random Seed"
+              value={randomSeed}
+              onChange={setRandomSeed}
+              placeholder="100"
+              required={true}
+              description="Random seed value (integer) - passed as RANDOM_SEED environment variable"
+            />
+          </div>
+
+          {/* Run Button */}
+          <StepRunButton
+            stepNumber={1}
+            onClick={handleRunStep1}
+            isFormValid={isFormValid()}
+            isRunning={isRunning || hasRunningProject}
+            message={message}
+          />
+          {/* Task Status Monitor */}
+          <ProjectStatusMonitor
+            projectUuid={projectUuid}
+            projectName={projectName}
+            containerId={containerId}
+            stepNumber={1}
+            onTaskComplete={refreshTaskInfo}
+          />
+        </div>
+      </div>
+
+      <StepDescriptionModal
+        isOpen={isDescriptionModalOpen}
+        onClose={() => setIsDescriptionModalOpen(false)}
+        stepNumber={1}
+        stepTitle="Decoy Spectra Generation"
+        description="In this step, Decoy Spectra are generated from the input data."
+        requiredInputs={[
+          "Task Name",
+          "Input Folder Path (bind mount to /app/input)",
+          "Output Folder Path (bind mount to /app/output)",
+          "Memory",
+          "Precursor Tolerance",
+          "Random Seed",
+        ]}
+      />
+    </div>
+  );
+}
+
+export default Step1;
